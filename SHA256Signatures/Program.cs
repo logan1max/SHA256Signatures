@@ -22,7 +22,7 @@ namespace SHA256Signatures
                 Console.WriteLine("Максимально возможный размер блока: {0} байт", int.MaxValue);
                 Console.Write("Введите размер блока в байтах: ");
                 size = Convert.ToInt32(Console.ReadLine());
-                if ((size == 0) || (size > int.MaxValue))
+                if ((size <= 0) || (size > int.MaxValue))
                 {
                     Console.WriteLine("Неправильный размер блока.");
                 }
