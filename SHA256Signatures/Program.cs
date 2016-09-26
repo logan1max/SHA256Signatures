@@ -1,15 +1,9 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
 using System.Security.Cryptography;
 using System.IO;
 using System.Threading;
-using System.Runtime.InteropServices;
-
-
 
 namespace SHA256Signatures
 {
@@ -17,336 +11,264 @@ namespace SHA256Signatures
     {
         static void Main(string[] args)
         {
-            //     Encryption encr = new Encryption(args[0], Convert.ToInt32(args[1]));
-            Encryption encr = new Encryption("abc.gz", 1000000000);
-            encr.threadsControl();
- //           Console.ReadLine();
+            try
+            {
+                string path = "";
+                int size = 0;
+
+                Console.Write("Введите путь файла: ");
+                path = Console.ReadLine();
+
+                Console.WriteLine("Максимально возможный размер блока: {0} байт", int.MaxValue);
+                Console.Write("Введите размер блока в байтах: ");
+                size = Convert.ToInt32(Console.ReadLine());
+                if ((size == 0) || (size > int.MaxValue))
+                {
+                    Console.WriteLine("Неправильный размер блока.");
+                }
+
+                Encryption encr = new Encryption(path, size);
+                encr.threadsControl();
+            }
+            catch(Exception e)
+            {
+                Console.WriteLine("Ошибка: {0}\nStackTrace: {1}", e.Message, e.StackTrace);
+            }
         }
     }
 
     class Encryption
     {
-//        public static byte[] originalFileBytes = null; //массив байт исходного файла
         public static FileInfo originalFile; 
         public static long partSize = 0; //размер блока
         public static long lastPartSize = 0; //размер последнего блока
-        public static int numParts = 0; //количество блоков
- //       public bool isLastPart = false; //флаг последнего блока
-        public static string[] hash;
-        public double coef = 0;
-        public static long subPartSize = 0, 
-                            lSubPartSize = 0;
-        public static int numSubParts = 0,
-                            lNumSubParts = 0;
-        public static long lastSubPartSize = 0,
-                            lLastSubPartSize = 0;
-        public static Semaphore _pool = new Semaphore(2, 2);
+        public static long numParts = 0; //количество блоков
+        public static bool isLastPart = false; //флаг последнего блока
+        public static int lastPartNumber = 0; //индекс последнего блока
+        public static string[] hash; //массив строк значений хэш-функции для каждого блока
+        public static Semaphore pool; //семафор
+        public int maxThreads = 0; //максимальное количество потоков, которые могут быть запущены одновременно
 
         public Encryption(string _filename,long _partSize)
         {
-            originalFile = new FileInfo(_filename);
-            partSize = _partSize;
-
-            //подсчет количества блоков
-            long fileLength = originalFile.Length;
-
-            //пока не достигнут конец файла
-            while (fileLength > 0)
+            try
             {
-                //если размер последнего блока меньше или равно заданному размеру блока
-                if (fileLength <= partSize)
+                originalFile = new FileInfo(@_filename);
+                partSize = _partSize;
+
+                numParts = originalFile.Length / partSize; //количество частей
+                lastPartSize = originalFile.Length % partSize; //размер последней части
+
+                if (lastPartSize != 0)
                 {
-                    lastPartSize = fileLength; //вычисление размера последнего блока
-                    numParts++;
-                    fileLength = 0;
-                }
-                else
-                {
-                    fileLength -= partSize;
                     numParts++;
                 }
+                else if (lastPartSize == 0)
+                {
+                    lastPartSize = partSize;
+                }
+
+                lastPartNumber = (int)numParts - 1;
+
+                hash = new string[numParts]; 
             }
-            hash = new string[numParts];
-            coef = lastPartSize / (double)partSize;
+            catch(FileNotFoundException fe)
+            {
+                Console.WriteLine("Ошибка: {0}\nStackTrace: {1}", fe.Message, fe.StackTrace);
+                return;
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine("Ошибка: {0}\nStackTrace: {1}", e.Message, e.StackTrace);
+            }            
         }
         
         public void threadsControl()
         {
-            Process currentProcess = Process.GetCurrentProcess();
-            currentProcess.PriorityClass = ProcessPriorityClass.High;
-
-            Thread[] encr = new Thread[numParts]; //создание массива потоков
-
-            //инициализация массива потоков
-            for (int i = 0; i < numParts; i++)
+            try
             {
-                //каждый поток будет выполнять процедуру hashToDict с параметром
-                encr[i] = new Thread(new ParameterizedThreadStart(hashToDict));
-            }
+                Process currentProcess = Process.GetCurrentProcess();
+                currentProcess.PriorityClass = ProcessPriorityClass.High; //выставление максимального приоритета текущему процесса
 
-            int unstartedThreads = numParts; //счетчик незапущенных потоков
-            int runningThreads = 0; //счетчик выполняемых потоков
-            int stoppedThreads = 0; //счетчик выполненных потоков
-            
-            //вычисление свободной памяти
-            PerformanceCounter ramCounter = new PerformanceCounter("Memory", "Available Bytes");
-            double availableMemory = ramCounter.NextValue()-2000000000;
-            double occupiedMemory = 0; //счетчик занятой памяти
+                PerformanceCounter ramCounter = new PerformanceCounter("Memory", "Available Bytes");
+                double availableRAM = ramCounter.NextValue(); //подсчет свободной оперативной памяти
 
-            long len = partSize;
-            if (originalFile.Length < availableMemory-1000000000)
-            {
-                subPartSize = Convert.ToInt64(Math.Floor((availableMemory - 1000000000) / (numParts - 1 + coef)));
-                lSubPartSize = (long)(Math.Floor(coef * subPartSize));
-            }
-            else
-            {
-                subPartSize = partSize;
-                lSubPartSize = (long)(Math.Floor(coef * subPartSize));
-            }
-            Console.WriteLine(availableMemory/(numParts-1+coef));
-
-            while (len > 0)
-            {
-                Console.WriteLine("len: {0}", len);
-                //если размер последнего блока меньше или равно заданному размеру блока
-                if (len <= subPartSize)
+                //если размер части больше доступной оперативной памяти
+                if (partSize > availableRAM)
                 {
-                    lastSubPartSize = len; //вычисление размера последнего блока
-                    numSubParts++;
-                    len = 0;                    
+                    Console.WriteLine("Размер блока меньше доступной оперативной памяти.\nВ данный момент доступно: {0} байт.", availableRAM);
+                    return;
+                }
+                //задание максимального размера рабочего пространства для текущего процесса
+                if (int.MaxValue < availableRAM)
+                {
+                    currentProcess.MaxWorkingSet = (IntPtr)int.MaxValue;
+                }
+                else if (int.MaxValue >= availableRAM)
+                {
+                    currentProcess.MaxWorkingSet = (IntPtr)availableRAM;
+                }
+                //подсчет количества потоков, которые могут быть запущены одновременно
+                maxThreads = (int)currentProcess.MaxWorkingSet / (int)partSize;
+                //если достаточно памяти для запуска последнего потока
+                if (((maxThreads * partSize) + lastPartSize) <= (int)currentProcess.MaxWorkingSet)
+                {
+                    pool = new Semaphore(maxThreads + 1, maxThreads + 1); //инициализация семафора
+                    isLastPart = true; //флаг, что последний поток можно запустить сразу
                 }
                 else
                 {
-                    len -= subPartSize;
-                    numSubParts++;
+                    pool = new Semaphore(maxThreads, maxThreads); //инициализация семафора
                 }
-            }
 
-            len = lastPartSize;
-            Console.WriteLine("size: {0}, num: {1}, last: {2}, len: {3}", subPartSize, numSubParts, lastSubPartSize,len);
-            while (len > 0)
-            {
-                //если размер последнего блока меньше или равно заданному размеру блока
-                if (len <= lSubPartSize)
-                {
-                    lLastSubPartSize = len; //вычисление размера последнего блока
-                    lNumSubParts++;
-                    len = 0;
-                }
-                else
-                {
-                    len -= lSubPartSize;
-                    lNumSubParts++;
-                }
-            }
+                int occupiedMemory = 0; //счетчик занятой оперативной памяти потоками
+                
+                int[] stoppedThreads = new int[numParts]; //массив флагов выполненных потоков
+                Array.Clear(stoppedThreads, 0, stoppedThreads.Length);
 
-            
-            while (stoppedThreads != numParts) //пока не выполнятся все потоки
-            {
+                Thread[] encr = new Thread[numParts]; //создание массива потоков
+
+                //инициализация массива потоков
                 for (int i = 0; i < numParts; i++)
                 {
-                    if (encr[i].ThreadState == System.Threading.ThreadState.Unstarted)
-                    {
-         
-                        if (i != (numParts - 1) && ((occupiedMemory+partSize) < ramCounter.NextValue()))
-                        {
-         //                   GC.Collect();
-                            encr[i].Start(i); Thread.Sleep(1000);
-         //                   encr[i].Join();
-                            unstartedThreads--;
-                            runningThreads++;
-                            occupiedMemory += partSize;
-                        }
-                        else if (i == (numParts - 1) && ((occupiedMemory+lastPartSize) < ramCounter.NextValue()))
-                        {
-                            encr[i].Start(i);
-
-                            unstartedThreads--;
-                            runningThreads++;
-                            occupiedMemory -= lastPartSize;
-                        }
-                    }
-
-                    if ((encr[i].ThreadState == System.Threading.ThreadState.Stopped) && (stoppedThreads < numParts))
-                    {
-               //         encr[i].Abort();
-                        runningThreads--;
-                        stoppedThreads++;
-                        
-    //                    if (i == (numParts - 1)) occupiedMemory -= lastPartSize;
-                        
-   //                     else occupiedMemory -= partSize;
-  //                      Console.WriteLine("Thread {0} has ended.", i);
-                    }
+                    //каждый поток будет выполнять процедуру hashToDict с параметром
+                    encr[i] = new Thread(new ParameterizedThreadStart(hashToDict));
                 }
-                
-            }
-            
-            //синхронизация потоков
-            for(int i=0;i<numParts;i++)
-            {
-  //              encr[i].Start(i);
-                encr[i].Join();
-            }
 
-            //           Thread.Sleep(1000);
- //           int count=0;
-//            List<int> notWrote=new List<int>();
-            
-            for(int i=0;i<numParts;i++)
-            {
-                if (hash[i] != null)
+                bool flag = false; //флаг выполнения всех потоков
+
+                while (flag != true) //пока не выполнятся все потоки
+                {
+                    //за одну итерацию проверяются все потоки
+                    for (int i = 0; i < numParts; i++)
+                    {
+                        //если установлен флаг и последний поток еще не был запущен
+                        if (isLastPart && encr[lastPartNumber].ThreadState == System.Threading.ThreadState.Unstarted)
+                        {
+                            encr[lastPartNumber].Start(lastPartNumber); //запуск потока
+                            occupiedMemory += (int)lastPartSize; //увеличение счетчика занятой памяти на размер последнего блока
+                        }
+                        //если поток еще не был запущен
+                        else if (encr[i].ThreadState == System.Threading.ThreadState.Unstarted)
+                        {
+                            //если непоследний поток и если после его запуска размер всех запущенных потоков не будет превышать максимальный размер рабочего пространства
+                            if ((i != lastPartNumber) && ((occupiedMemory + partSize) < (int)currentProcess.MaxWorkingSet))
+                            {
+                                encr[i].Start(i); //запуск потока
+                                occupiedMemory += (int)partSize; //увеличение счетчика занятой памяти на размер блока
+                            }
+                            //если непоследний поток и если после его запуска размер всех запущенных потоков не будет превышать максимальный размер рабочего пространства
+                            else if ((i == lastPartNumber) && ((occupiedMemory + lastPartSize) < (int)currentProcess.MaxWorkingSet))
+                            {
+                                encr[i].Start(i); //запуск потока
+                                occupiedMemory += (int)lastPartSize; //увеличение счетчика занятой памяти на размер последнего блока блока
+                            }
+                        }
+                        //если поток выполнен
+                        else if ((encr[i].ThreadState == System.Threading.ThreadState.Stopped))
+                        {
+                            stoppedThreads[i] = 1; //установка флага о том что поток с текущим номером выполнен
+                            //если последний поток
+                            if (i == (lastPartNumber))
+                            {
+                                occupiedMemory -= (int)lastPartSize; //уменьшение счетчика занятой памяти на размер последнего блока блока
+                            }
+                            //иначе
+                            else
+                            {
+                                occupiedMemory -= (int)partSize; //уменьшение счетчика занятой памяти на размер блока
+                            }
+                        }
+                    }
+                    //подсчет количества выполненных потоков
+                    int countStoppedThreads = 0;
+                    for (int i = 0; i < numParts; i++)
+                    {
+                        //если поток остановлен
+                        if (stoppedThreads[i] == 1)
+                        {
+                            countStoppedThreads++; //инкремент счетчика
+                        }
+                    }
+
+                    //если не все потоки выполнены
+                    if (countStoppedThreads == numParts)
+                    {
+                        flag = true;
+                    }
+
+                }
+
+                Console.WriteLine("Значения хэш-функции SHA256:\n");
+                //вывод значений хэш-функции всех частей
+                for (int i = 0; i < numParts; i++)
+                {
                     Console.WriteLine("{0} : {1}", i, hash[i]);
-                else counter1++;
-                                                
+                }
             }
-            Console.WriteLine(counter1);
- /*           foreach(int i in notWrote)
+            catch(Exception e)
             {
-                Console.WriteLine("Thread {0} didn't write hash", i);
+                Console.WriteLine("Ошибка: {0}\nStackTrace: {1}", e.Message, e.StackTrace);
             }
-
-            foreach(int i in notWrote)
-            {
-                hashToDict(i);
-                Console.WriteLine("{0} : {1}", i, hashParts[i]);
-            }
-            
-            foreach(string str in hash)
-            {
-                if (str != null) counter2++;
-            }
-            Console.WriteLine(hash[notWrote[0]]);*/
         }
 
+        //перевод массива байт в строку
         public static string BytesToStr(byte[] bytes)
         {
-            StringBuilder str = new StringBuilder();
+            try
+            {
+                StringBuilder str = new StringBuilder();
 
-            for (int i = 0; i < bytes.Length; i++)
-                str.AppendFormat("{0:X2}", bytes[i]);
+                for (int i = 0; i < bytes.Length; i++)
+                    str.AppendFormat("{0:X2}", bytes[i]);
 
-            return str.ToString();
+                return str.ToString();
+            }
+            catch(Exception e)
+            {
+                Console.WriteLine("Ошибка: {0}\nStackTrace: {1}", e.Message, e.StackTrace);
+                return "";
+            }
         }
 
-        public static int counter1 = 0, counter2 = 0, counter3 = 0;
         //каждый процесс вычисляет значение hash-функции для заданного номера блока
         public static void hashToDict(object _numPart)
         {
-            _pool.WaitOne();
+            pool.WaitOne(); //блокировка текущего потока
             int numPart = Convert.ToInt32(_numPart);
-            using (FileStream fs = new FileStream(originalFile.Name, FileMode.Open, FileAccess.Read))
+            try
             {
-                SHA256Managed sha256HashString = new SHA256Managed();
-                
-                //              Encoding enc8 = Encoding.ASCII;
-
-                int hashOffset = 0;
-
-                if (numPart != numParts) //если часть не последняя
+                using (FileStream fs = new FileStream(originalFile.FullName, FileMode.Open, FileAccess.Read))
                 {
-                    for(int i = 0; i < numSubParts; i++)
-                    {
-                        //                Console.WriteLine("numSub: {0}", numSubParts);
+                    SHA256Managed sha256HashString = new SHA256Managed(); //переменная для хэширования массива байт
 
-                        Console.WriteLine("seek: {0}", fs.Seek((numPart * partSize) + (i * subPartSize), SeekOrigin.Begin));
-                        if (i != (numSubParts-1))
-                        {
-                            Console.WriteLine("i: {0}, thread: {1}, offset: {2}", i, numPart, hashOffset);
-                            byte[] subPart = new byte[subPartSize];
-                            fs.Read(subPart, 0, Convert.ToInt32(subPartSize));
-                            
-                            hashOffset += sha256HashString.TransformBlock(subPart, hashOffset, Convert.ToInt32(subPartSize), subPart, hashOffset);
-                            Console.WriteLine("i: {0}, thread: {1}, offset: {2}", i, numPart, hashOffset);
-                            subPart = null;
-                            GC.Collect();
-                            GC.WaitForPendingFinalizers();
-                        }
-                        else if (i==(numSubParts-1))
-                        {
-                            
-                            byte[] subPart = new byte[lastSubPartSize];
-                            fs.Read(subPart, 0, Convert.ToInt32(lastSubPartSize));
-                            Console.WriteLine("i: {0}, thread: {1}, offset: {2}, lastSize: {3}, sum: {4}", i, numPart, hashOffset, Convert.ToInt32(lastSubPartSize), subPart.Length);
-                            try
-                            {
-                                sha256HashString.TransformFinalBlock(subPart, 0, Convert.ToInt32(lastSubPartSize));
-                            }
-                            catch(Exception e)
-                            {
-                                Console.WriteLine(e);
-                                Console.WriteLine("StackTrace: {0}",e.StackTrace);
-                            }
-                            subPart = null;
-                            GC.Collect();
-                            GC.WaitForPendingFinalizers();
-                        }                        
+                    Console.WriteLine("Поток {0} запущен", numPart);
+                    byte[] part; //массив байт блока
+
+                    if (numPart == (lastPartNumber)) //если последний блок
+                    {
+                        part = new byte[lastPartSize];
+                        fs.Seek(numPart * partSize, SeekOrigin.Begin); //установка указателя в файле, который определяется как: номер_блока*размер_блока
+                        fs.Read(part, 0, (int)lastPartSize); //запись в массив part указанного количества байт
                     }
-                }
-                else if (numPart==numParts)
-                {
-                    hashOffset = 0;
-                    for (int i = 0; i < lNumSubParts; i++)
+                    else //иначе
                     {
-                        fs.Seek((numPart * partSize) + (i * lSubPartSize), SeekOrigin.Begin);
-                        if (i != lNumSubParts)
-                        {
-                            byte[] subPart = new byte[lSubPartSize];
-                            fs.Read(subPart, 0, Convert.ToInt32(lSubPartSize));
-                            hashOffset += sha256HashString.TransformBlock(subPart, hashOffset, Convert.ToInt32(subPartSize), subPart, hashOffset);
-                            subPart = null;
-                            GC.Collect();
-                            GC.WaitForPendingFinalizers();
-                        }
-                        else if (i == (lNumSubParts-1))
-                        {
-                            byte[] subPart = new byte[lLastSubPartSize];
-                            fs.Read(subPart, 0, Convert.ToInt32(lLastSubPartSize));
-                            sha256HashString.TransformFinalBlock(subPart, 0, Convert.ToInt32(lLastSubPartSize));
-                            subPart = null;
-                            GC.Collect();
-                            GC.WaitForPendingFinalizers();
-                        }
-                    }
-                }
-                //           counter1++;
-
-                hash[numPart] = BytesToStr(sha256HashString.Hash);
-                Console.WriteLine("Thread {0} has ended", numPart);
-  //              Thread.Sleep(500);
-                
-                
-                /*
-                //          byte[] partBytes = new byte[partSize]; //массив байт блока
-                List<byte> blockFile = new List<byte>();
-
-                MemoryStream ms = new MemoryStream();
-
-                if (numPart == numParts) //если последний блок
-                {
-                    fs.Seek(numPart * lastPartSize, SeekOrigin.Begin);
-                    for (long i = 0; i < lastPartSize; i++)
-                    {
-                        ms.WriteByte((byte)fs.ReadByte());
+                        part = new byte[partSize];
+                        fs.Seek(numPart * partSize, SeekOrigin.Begin); //установка указателя в файле, который определяется как: номер_блока*размер_блока
+                        fs.Read(part, 0, (int)partSize); //запись в массив part указанного количества байт
                     }
 
+                    hash[numPart] = BytesToStr(sha256HashString.ComputeHash(part)); //запись значения хэш-функции для блока numPart
+                    part = null; //обнуление массива
+
+                    Console.WriteLine("Поток {0} завершен", numPart);
                 }
-                else
-                {
-                    fs.Seek(numPart * partSize, SeekOrigin.Begin);
-                    for (long i = 0; i < partSize; i++)
-                    {
-                        ms.WriteByte((byte)fs.ReadByte());
-                    }
-                }
-                
-                byte[] hashBytes = new byte[sha256HashString.ComputeHash(ms).Length];
-                hashBytes = sha256HashString.ComputeHash(ms); //вычисление значения hash-функции и запись в массив
-                hashParts.Add(numPart, BitConverter.ToInt32(hashBytes, 0)); //добавление в словарь
-    */
             }
-            _pool.Release();
+            catch(Exception e)
+            {
+                Console.WriteLine("Поток {0}\nОшибка: {1}\nStackTrace: {2}", numPart, e.Message, e.StackTrace);
+            }
+            pool.Release(); //выход из семафора
         }
     }
 }
