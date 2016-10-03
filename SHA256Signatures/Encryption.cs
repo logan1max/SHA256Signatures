@@ -7,39 +7,9 @@ using System.Threading;
 
 namespace SHA256Signatures
 {
-    class Program
+    class Encryption
     {
-        static void Main(string[] args)
-        {
-            try
-            {
-                string path = "";
-                int size = 0;
-
-                Console.Write("Введите путь файла: ");
-                path = Console.ReadLine();
-
-                Console.WriteLine("Максимально возможный размер блока: {0} байт", int.MaxValue);
-                Console.Write("Введите размер блока в байтах: ");
-                size = Convert.ToInt32(Console.ReadLine());
-                if ((size <= 0) || (size > int.MaxValue))
-                {
-                    Console.WriteLine("Неправильный размер блока.");
-                }
-
-                Encryption encr = new Encryption(path, size);
-                encr.threadsControl1();
-            }
-            catch(Exception e)
-            {
-                Console.WriteLine("Ошибка: {0}\nStackTrace: {1}", e.Message, e.StackTrace);
-            }
-        }
-    }
-
-  /*  class Encryption
-    {
-        public static FileInfo originalFile; 
+        public static FileInfo originalFile;
         public static long partSize = 0; //размер блока
         public static long lastPartSize = 0; //размер последнего блока
         public static long numParts = 0; //количество блоков
@@ -48,8 +18,9 @@ namespace SHA256Signatures
         public static string[] hash; //массив строк значений хэш-функции для каждого блока
         public static Semaphore pool; //семафор
         public int maxThreads = 0; //максимальное количество потоков, которые могут быть запущены одновременно
+        public Process currentProcess = Process.GetCurrentProcess();
 
-        public Encryption(string _filename,long _partSize)
+        public Encryption(string _filename, long _partSize)
         {
             try
             {
@@ -70,9 +41,9 @@ namespace SHA256Signatures
 
                 lastPartNumber = (int)numParts - 1;
 
-                hash = new string[numParts]; 
+                hash = new string[numParts];
             }
-            catch(FileNotFoundException fe)
+            catch (FileNotFoundException fe)
             {
                 Console.WriteLine("Ошибка: {0}\nStackTrace: {1}", fe.Message, fe.StackTrace);
                 return;
@@ -80,16 +51,13 @@ namespace SHA256Signatures
             catch (Exception e)
             {
                 Console.WriteLine("Ошибка: {0}\nStackTrace: {1}", e.Message, e.StackTrace);
-            }            
+            }
         }
-        
-        public void threadsControl()
+
+        public int maxWorkingSetCount()
         {
             try
-            {
-                Process currentProcess = Process.GetCurrentProcess();
-                currentProcess.PriorityClass = ProcessPriorityClass.High; //выставление максимального приоритета текущему процесса
-
+            {                
                 PerformanceCounter ramCounter = new PerformanceCounter("Memory", "Available Bytes");
                 double availableRAM = ramCounter.NextValue(); //подсчет свободной оперативной памяти
 
@@ -97,8 +65,9 @@ namespace SHA256Signatures
                 if (partSize > availableRAM)
                 {
                     Console.WriteLine("Размер блока меньше доступной оперативной памяти.\nВ данный момент доступно: {0} байт.", availableRAM);
-                    return;
+                    return 1;
                 }
+
                 //задание максимального размера рабочего пространства для текущего процесса
                 if (int.MaxValue < availableRAM)
                 {
@@ -109,7 +78,9 @@ namespace SHA256Signatures
                     currentProcess.MaxWorkingSet = (IntPtr)availableRAM;
                 }
                 //подсчет количества потоков, которые могут быть запущены одновременно
-                maxThreads = (int)currentProcess.MaxWorkingSet / (int)partSize;
+                maxThreads = (int)currentProcess.MaxWorkingSet / (int)partSize;                
+                pool = new Semaphore(maxThreads, maxThreads);
+
                 //если достаточно памяти для запуска последнего потока
                 if (((maxThreads * partSize) + lastPartSize) <= (int)currentProcess.MaxWorkingSet)
                 {
@@ -121,8 +92,60 @@ namespace SHA256Signatures
                     pool = new Semaphore(maxThreads, maxThreads); //инициализация семафора
                 }
 
+                return 0;
+            }
+            catch(Exception e)
+            {
+                Console.WriteLine("Ошибка: {0}\nStackTrace: {1}", e.Message, e.StackTrace);
+                return 1;
+            }
+        }
+
+        public void threadsControl()
+        {
+            try
+            {
+                currentProcess.PriorityClass = ProcessPriorityClass.High; //выставление максимального приоритета текущему процесса
+
+                if (maxWorkingSetCount() == 1)
+                {
+                    return;
+                }
+
+                Thread[] encr = new Thread[maxThreads]; //создание массива потоков
+
+                //инициализация массива потоков
+                for (int i = 0; i < maxThreads; i++)
+                {
+                    
+                    encr[i] = new Thread(new ParameterizedThreadStart(hashToDict));
+                }
+
+                using (FileStream fs = new FileStream(originalFile.FullName, FileMode.Open, FileAccess.Read))
+                {
+
+                }
+
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine("Ошибка: {0}\nStackTrace: {1}", e.Message, e.StackTrace);
+            }
+        }
+
+        public void threadsControl1()
+        {
+            try
+            {
+                currentProcess.PriorityClass = ProcessPriorityClass.High; //выставление максимального приоритета текущему процесса
+
+                if (maxWorkingSetCount() == 1)
+                {
+                    return;
+                }
+
                 int occupiedMemory = 0; //счетчик занятой оперативной памяти потоками
-                
+
                 int[] stoppedThreads = new int[numParts]; //массив флагов выполненных потоков
                 Array.Clear(stoppedThreads, 0, stoppedThreads.Length);
 
@@ -191,15 +214,26 @@ namespace SHA256Signatures
                         }
                     }
 
-                    //если не все потоки выполнены
+                    //если все потоки выполнены
                     if (countStoppedThreads == numParts)
                     {
                         flag = true;
                     }
                 }
 
-                Console.WriteLine("\nЗначения хэш-функции SHA256:\n");
-                //вывод значений хэш-функции всех частей
+                hashWrite(); //вывод значений хэш-функции всех частей
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine("Ошибка: {0}\nStackTrace: {1}", e.Message, e.StackTrace);
+            }
+        }
+
+        public void hashWrite()
+        {
+            try
+            {
+                Console.WriteLine("\nЗначения хэш-функции SHA256:\n");                
                 for (int i = 0; i < numParts; i++)
                 {
                     Console.WriteLine("{0} : {1}", i, hash[i]);
@@ -223,10 +257,36 @@ namespace SHA256Signatures
 
                 return str.ToString();
             }
-            catch(Exception e)
+            catch (Exception e)
             {
                 Console.WriteLine("Ошибка: {0}\nStackTrace: {1}", e.Message, e.StackTrace);
                 return "";
+            }
+        }
+
+        //каждый процесс вычисляет значение hash-функции для заданного номера блока
+        public static void hashToArray(object _part,object _numPart)
+        {
+            try
+            {
+                pool.WaitOne(); //блокировка текущего потока
+
+                byte[] part = (byte[])_part; //массив байт блока
+                int numPart = Convert.ToInt32(_numPart);
+                Console.WriteLine("Поток {0} запущен", numPart);
+
+                SHA256Managed sha256HashString = new SHA256Managed(); //переменная для хэширования массива байт
+                                
+                hash[numPart] = BytesToStr(sha256HashString.ComputeHash(part)); //запись значения хэш-функции для блока numPart
+                part = null; //обнуление массива
+
+                Console.WriteLine("Поток {0} завершен", numPart);
+
+                pool.Release(); //выход из семафора
+            }
+            catch(Exception e)
+            {
+                Console.WriteLine("Ошибка: {0}\nStackTrace: {1}", e.Message, e.StackTrace);
             }
         }
 
@@ -263,11 +323,11 @@ namespace SHA256Signatures
                     Console.WriteLine("Поток {0} завершен", numPart);
                 }
             }
-            catch(Exception e)
+            catch (Exception e)
             {
                 Console.WriteLine("Поток {0}\nОшибка: {1}\nStackTrace: {2}", numPart, e.Message, e.StackTrace);
             }
             pool.Release(); //выход из семафора
         }
-    }*/
+    }
 }
