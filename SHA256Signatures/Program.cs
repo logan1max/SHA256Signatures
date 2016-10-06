@@ -28,7 +28,7 @@ namespace SHA256Signatures
                 }
 
                 Encryption encr = new Encryption(path, size);
-                encr.threadsControl1();
+                encr.threadsControl();
             }
             catch(Exception e)
             {
