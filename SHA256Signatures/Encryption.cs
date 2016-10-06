@@ -20,6 +20,7 @@ namespace SHA256Signatures
         int maxThreads = 0; //максимальное количество потоков, которые могут быть запущены одновременно
         Process currentProcess = Process.GetCurrentProcess();
         static Queue<byte[]> partQueue = new Queue<byte[]>();
+        static Queue<MemoryStream> partQ = new Queue<MemoryStream>();
         static Mutex queueMutex = new Mutex();
         static Semaphore sem = new Semaphore(1, 1);
 
@@ -75,11 +76,11 @@ namespace SHA256Signatures
                 //задание максимального размера рабочего пространства для текущего процесса
                 if (int.MaxValue < availableRAM)
                 {
-                    currentProcess.MaxWorkingSet = (IntPtr)(int.MaxValue);
+          //          currentProcess.MaxWorkingSet = (IntPtr)(int.MaxValue);
                 }
                 else if (int.MaxValue >= availableRAM)
                 {
-                    currentProcess.MaxWorkingSet = (IntPtr)availableRAM;
+     //               currentProcess.MaxWorkingSet = (IntPtr)availableRAM;
                 }
                 //подсчет количества потоков, которые могут быть запущены одновременно
                 maxThreads = (int)currentProcess.MaxWorkingSet / (int)partSize;
@@ -101,7 +102,7 @@ namespace SHA256Signatures
             {
                 try
                 {
-                    byte[] part=null;
+                    byte[] part;
                     for (int i = 0; i < numParts; i++)
                     {
                         //                     queueMutex.WaitOne();
@@ -128,13 +129,18 @@ namespace SHA256Signatures
                                         }
                                         partQueue.Enqueue(ms.ToArray());
                                     }*/
+                                    
+                        Console.WriteLine("Выделение памяти для массива");
+                        Console.ReadLine();
+                        part = new byte[len];                        
 
-                        part = new byte[len];
-
+                        Console.WriteLine("Чтение из файла");
+                        Console.ReadLine();
                         fs.Read(part, 0, (int)len);
                         
+                        Console.WriteLine("Запись в очередь");
+                        Console.ReadLine();
                         partQueue.Enqueue(part);
-                        
                         //                  GC.Collect(1,GCCollectionMode.Optimized);
                         //                 GC.WaitForPendingFinalizers();
 
@@ -163,19 +169,15 @@ namespace SHA256Signatures
             {
                 SHA256Managed sha256HashString = new SHA256Managed(); //переменная для хэширования массива байт
                 int numPart = 0;
-                byte[] part;
+      //          byte[] part;
 
                 while (numPart < numParts)
                 {
                     while (partQueue.Count != 1) { }
-
-                    int len1 = partQueue.Peek().GetLength(0);
-
+                    
                     sem.WaitOne();
 
                     Console.WriteLine("Блок {0} обрабатывается", numPart);
-                    Console.WriteLine("queue: {0},lastpart: {1}", len1, (int)lastPartSize);
-
                     //               queueMutex.WaitOne();
 
                     long len = 0;
@@ -189,21 +191,29 @@ namespace SHA256Signatures
                     }
 
                     //              part = new byte[len];
-                    part = partQueue.Dequeue(); //массив байт блока
+                    //              part = partQueue.Dequeue(); //массив байт блока
 
+                    //               hash[numPart] = BytesToStr(sha256HashString.ComputeHash(partQueue.Dequeue())); //запись значения хэш-функции для блока numPart
 
-                    hash[numPart] = BytesToStr(sha256HashString.ComputeHash(part)); //запись значения хэш-функции для блока numPart
-
+                    hash[numPart] = sha256HashString.ComputeHash(partQueue.Dequeue()).ToString();
+                    
+                    Console.WriteLine("Удаление из очереди");
+                    Console.ReadLine();
                     //               queueMutex.ReleaseMutex();
+                    //            part = null;
 
+        //            sha256HashString = null;
+                    
                     GC.Collect(2, GCCollectionMode.Forced);
-
                     GC.WaitForPendingFinalizers();
                     GC.Collect();
+
+                    Thread.Sleep(1000);
+
                     sem.Release();
+
                     Console.WriteLine("Блок {0} записан", numPart);
                     numPart++;
-
                 }
             }
             catch (Exception e)
@@ -235,7 +245,6 @@ namespace SHA256Signatures
                 calculateThread.Join();
 
                 hashWrite();
-
             }
             catch (Exception e)
             {
@@ -374,9 +383,7 @@ namespace SHA256Signatures
                 return "";
             }
         }
-
         
-
         //каждый процесс вычисляет значение hash-функции для заданного номера блока
         private static void hashToDict(object _numPart)
         {
